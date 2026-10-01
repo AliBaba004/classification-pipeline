@@ -1,0 +1,179 @@
+\documentclass[10pt,a4paper,twocolumn]{article}
+
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+
+\title{Modeling a More Complex Classification System}
+\author{Ali Hussain}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+
+\section{Proposed Pipeline}
+
+The proposed pipeline is designed to classify two-dimensional data when the
+training data does not already have class labels. Most of the work is completed
+offline on a computer. Only a small lookup step is performed on the embedded
+device.
+
+First, the training features are scaled using min--max scaling. DBSCAN is then
+used to discover groups in the unlabelled training data. A Gaussian kernel
+density estimate (KDE) is fitted separately to each discovered class. Each
+density map is normalised to its own peak and sampled onto a fixed grid. The
+grid values are then converted to \texttt{uint8} so that each cell requires
+only one byte.
+
+The embedded device does not run DBSCAN or KDE. Those steps are already
+completed offline. The device stores the byte tables, the training scaling
+bounds, the grid size, and the reject threshold.
+
+For a new query point, the device scales the two features using the stored
+training bounds. It then finds the correct grid cell and reads one byte from
+each class table. The class with the largest stored value is selected. If the
+largest value is below the reject threshold, the output is UNKNOWN instead of
+forcing the point into a class.
+
+\begin{algorithm}[!bt]
+\caption{Table-lookup classification}
+\label{alg:lookup}
+\begin{algorithmic}[1]
+
+\Require Raw query point $(x,y)$
+\Require One byte table $Q_c$ for each class
+\Require Training scaling bounds
+\Require Grid size $G$
+\Require Reject threshold $\tau$
+\Ensure Predicted class or UNKNOWN
+
+\State Scale $x$ and $y$ using the stored training bounds
+
+\State $col \gets \lfloor \tilde{x}G \rfloor$
+\State $row \gets \lfloor \tilde{y}G \rfloor$
+
+\State Clip $row$ and $col$ to $[0,G-1]$
+
+\For{each class $c$}
+    \State $v_c \gets Q_c[row,col]/255$
+\EndFor
+
+\State $\hat{c} \gets \arg\max_c v_c$
+
+\If{$v_{\hat{c}} < \tau$}
+    \State \Return UNKNOWN
+\EndIf
+
+\State $p_c \gets v_c / \sum_k v_k$
+
+\State \Return $\hat{c}$ and distribution $p$
+
+\end{algorithmic}
+\end{algorithm}
+
+\section{Application}
+
+One possible application for this pipeline is a small wearable motion
+classifier that recognises different movement patterns from two sensor
+features.
+
+For this proposed device, I would reserve approximately 4~KB of flash for the
+classification model. The final lookup tables from this experiment require
+only 768 bytes, plus 16 bytes for the four scaling bounds, so the model fits
+comfortably inside this budget.
+
+Labelled training data may not be available because the device could collect
+motion data during normal use without a person manually identifying every
+sample. DBSCAN is useful in this situation because it can discover groups
+directly from the unlabelled feature data.
+
+The motion classes may also have non-round shapes in the feature space.
+Different movements can create curved or hollow regions rather than simple
+groups centred around one average point. A density-based method is therefore a
+better match than a nearest-centre method such as k-means.
+
+\section{Method and Setup}
+
+The experiment used a synthetic dataset containing 1030 two-dimensional
+points. The dataset was generated using the fixed random seed
+
+\[
+20250903.
+\]
+
+It contained two crescent-shaped groups, one ring-shaped group, and 90
+uniformly scattered background points.
+
+The dataset was divided into three parts:
+
+\begin{itemize}
+    \item 60\% training,
+    \item 20\% validation,
+    \item 20\% test.
+\end{itemize}
+
+The training set contained 618 points. It was used for DBSCAN clustering, KDE
+fitting, and creation of the stored lookup tables.
+
+The validation set was used to select the KDE bandwidth. The test set was kept
+unused during training and tuning and was used only once at the end to evaluate
+the frozen model.
+
+Both features were min--max scaled using bounds calculated only from the
+training set. The same bounds were used later to scale the validation, test,
+and query points.
+
+DBSCAN was applied to the scaled training data using
+
+\[
+\varepsilon = 0.06
+\]
+
+and
+
+\[
+\texttt{min\_samples} = 8.
+\]
+
+The baseline DBSCAN run discovered three clusters containing 209, 198, and
+178 points. Another 33 training points were labelled as noise.
+
+A Gaussian KDE was fitted separately to each discovered class. Noise points
+were excluded from the KDE fitting because they were not assigned to a
+discovered class.
+
+The KDE bandwidth was selected using the validation set. The tested values
+were
+
+\[
+0.03,\ 0.04,\ 0.05,\ 0.06,\ 0.08,\ 0.10,\ 0.12.
+\]
+
+The highest validation mean log-likelihood was produced by
+
+\[
+h = 0.05,
+\]
+
+so this value was used for the final model.
+
+Each normalised KDE surface was sampled onto a
+
+\[
+16 \times 16
+\]
+
+grid and stored using \texttt{uint8}. The reject threshold was
+
+\[
+\tau = 0.12.
+\]
+
+
+\end{document}
