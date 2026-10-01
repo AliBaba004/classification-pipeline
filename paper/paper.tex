@@ -2,6 +2,7 @@
 
 \usepackage{amsmath}
 \usepackage{graphicx}
+\graphicspath{{../figures/generated/}{figures/generated/}}
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{algorithm}
@@ -174,6 +175,287 @@ grid and stored using \texttt{uint8}. The reject threshold was
 \[
 \tau = 0.12.
 \]
+\section{Evidence}
 
+The evidence follows the same order as the data split. The model was built
+using the training data, the KDE bandwidth was selected using validation data,
+and the final stored model was checked using the held-out test set.
+
+\subsection{DBSCAN and k-means}
+
+Figure~\ref{fig:clustering} compares DBSCAN and k-means on the same training
+data.
+
+\begin{figure}[!bt]
+    \centering
+    \includegraphics[width=\linewidth]{clustered_space.pdf}
+    \caption{DBSCAN and k-means applied to the same training data.}
+    \label{fig:clustering}
+\end{figure}
+
+With $\varepsilon = 0.06$ and \texttt{min\_samples = 8}, DBSCAN discovered
+three clusters containing 209, 198, and 178 points. Another 33 points were
+labelled as noise.
+
+K-means was given the correct value of $k=3$, but it still divided the
+non-round shapes incorrectly. The crescents were cut into centre-based regions,
+and the ring could not be represented as a hollow shape. This happens because
+k-means assigns each point to its nearest centre, while DBSCAN follows regions
+of connected density.
+
+Changing $\varepsilon$ also showed how sensitive DBSCAN is to the
+neighbourhood radius. With $\varepsilon = 0.03$, the scaled data produced
+15 clusters and 82 noise points. With $\varepsilon = 0.30$, all 618 training
+points became one cluster with no noise.
+
+The effect of feature scaling is shown in Table~\ref{tab:scaling}.
+
+\begin{table}[!bt]
+\centering
+\caption{Effect of scaling on DBSCAN.}
+\label{tab:scaling}
+\begin{tabular}{lcc}
+\toprule
+Features & $\varepsilon=0.06$ & $\varepsilon=0.30$ \\
+\midrule
+Raw & 0 clusters, 618 noise & 10 clusters, 50 noise \\
+Scaled & 3 clusters, 33 noise & 1 cluster, 0 noise \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The same $\varepsilon$ value therefore produces very different results in raw
+and scaled feature spaces. Scaling gives the distance parameter a consistent
+meaning across both features.
+
+
+\subsection{KDE and Bandwidth Selection}
+
+The KDE bandwidth was selected using the validation set. The results are shown
+in Table~\ref{tab:bandwidth}.
+
+\begin{table}[!bt]
+\centering
+\caption{Validation bandwidth sweep.}
+\label{tab:bandwidth}
+\begin{tabular}{cc}
+\toprule
+Bandwidth $h$ & Mean log-likelihood \\
+\midrule
+0.03 & 1.668 \\
+0.04 & 1.775 \\
+0.05 & 1.806 \\
+0.06 & 1.767 \\
+0.08 & 1.632 \\
+0.10 & 1.487 \\
+0.12 & 1.353 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The highest validation score was obtained with $h=0.05$, so this value was
+used for the final model.
+
+Figure~\ref{fig:continuous} shows the continuous per-class KDE surfaces.
+
+\begin{figure}[!bt]
+    \centering
+    \includegraphics[width=\linewidth]{class_surfaces_continuous.pdf}
+    \caption{Continuous KDE surfaces for the three discovered classes.}
+    \label{fig:continuous}
+\end{figure}
+
+The two crescent-shaped classes remain curved and the ring keeps a hollow
+centre. This shows that the probability maps preserve the non-round shapes
+discovered by DBSCAN.
+
+Figure~\ref{fig:total} shows the continuous decision surface before the model
+is reduced to the stored lookup grid.
+
+\begin{figure}[!bt]
+    \centering
+    \includegraphics[width=\linewidth]{total_distribution.pdf}
+    \caption{Continuous decision surface before discretization.}
+    \label{fig:total}
+\end{figure}
+
+Using a smaller bandwidth of $h=0.03$ produced sharper and more local density
+regions. Using $h=0.12$ produced smoother and wider regions and made the
+ring's hollow centre less distinct. This shows why the bandwidth was selected
+using validation data instead of by choosing the plot that looked best.
+
+
+\subsection{Stored Model and Memory Cost}
+
+Figure~\ref{fig:stored} shows the same class maps after sampling them onto the
+$16 \times 16$ grid and storing each cell as \texttt{uint8}.
+
+\begin{figure}[!bt]
+    \centering
+    \includegraphics[width=\linewidth]{class_surfaces_discretized.pdf}
+    \caption{Per-class maps stored as uint8 lookup tables.}
+    \label{fig:stored}
+\end{figure}
+
+The stored maps are more blocky because the grid contains only
+$16 \times 16$ positions, but the same general class shapes remain visible.
+The visible difference mainly comes from grid resolution rather than byte
+quantization.
+
+The measured storage requirements are shown in
+Table~\ref{tab:footprint}.
+
+\begin{table}[!bt]
+\centering
+\caption{Model footprint using a $16 \times 16$ grid.}
+\label{tab:footprint}
+\begin{tabular}{lrrr}
+\toprule
+Storage & B/cell & Per class & All 3 \\
+\midrule
+\texttt{uint8}   & 1 & 256  & 768  \\
+\texttt{uint16}  & 2 & 512  & 1536 \\
+\texttt{float32} & 4 & 1024 & 3072 \\
+\texttt{float64} & 8 & 2048 & 6144 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The lookup-table footprint is
+
+\begin{equation}
+\text{flash bytes} = K G^2.
+\label{eq:footprint}
+\end{equation}
+
+For three classes and a $16 \times 16$ grid,
+
+\[
+3 \times 16^2 = 768 \text{ bytes}.
+\]
+
+The four scaling bounds add another 16 bytes when stored as
+\texttt{float32}.
+
+The measured worst-case \texttt{uint8} error was 0.195\% of peak density.
+This is very close to the expected maximum quantization error of approximately
+0.196\%. The \texttt{uint8} model therefore reduces the three lookup tables
+from 3072 bytes with \texttt{float32} to 768 bytes while introducing very
+little numerical error.
+
+When the grid was temporarily increased to $32 \times 32$, the
+\texttt{uint8} storage increased from 768 bytes to 3072 bytes. The ring shape
+was represented more smoothly, but doubling the grid resolution in each
+direction increased storage by four times because the footprint grows with
+$G^2$.
+
+
+\subsection{Held-out Query Classification}
+
+Figure~\ref{fig:decision} shows one held-out test point being classified by the
+stored model.
+
+\begin{figure}[!bt]
+    \centering
+    \includegraphics[width=\linewidth]{decision_map.pdf}
+    \caption{One held-out test point classified using the stored lookup tables.}
+    \label{fig:decision}
+\end{figure}
+
+The raw query point was
+
+\[
+(5.99958893,\ 3.17868816),
+\]
+
+which mapped to row 11, column 13 of the $16 \times 16$ grid.
+
+Nearest-cell lookup read the stored values
+
+\[
+[0,\ 255,\ 0]
+\]
+
+for classes 0, 1, and 2. This produced a distribution of
+
+\[
+[0\%,\ 100\%,\ 0\%]
+\]
+
+and classified the point as class 1.
+
+Bilinear lookup produced approximately
+
+\[
+[0,\ 221.8,\ 0]
+\]
+
+and gave the same 100\% class 1 distribution. The two methods therefore gave
+the same decision for this point. Nearest-cell lookup requires $K$ byte reads,
+while bilinear lookup requires $4K$ byte reads.
+
+Around the query cell, the class 1 byte values were
+
+\[
+\begin{array}{ccc}
+187 & 164 & 76 \\
+208 & 255 & 183 \\
+68 & 159 & 222
+\end{array}
+\]
+
+while the corresponding class 0 and class 2 values were all zero. The strong
+change between nearby cells shows that the stored surface can change sharply
+at this grid resolution. Bilinear interpolation would have the greatest effect
+near these cell boundaries.
+
+The reject threshold also affected a large part of the feature space.
+A total of 127 of the 256 grid cells were below $\tau = 0.12$, which is
+49.6\% of the grid. Without a reject threshold, points in these low-density
+areas would still be forced into one of the classes even though the model had
+little evidence for that decision.
+
+The raw point at the centre of the ring,
+
+\[
+(4.8,\ 1.6),
+\]
+
+was classified as UNKNOWN. This is the expected behaviour because the centre
+is surrounded by ring data but contains no training samples itself.
+
+\subsection{Held-out Test Result}
+
+The final stored model was evaluated once on the 206 held-out test points.
+The stored \texttt{uint8} classifier reproduced the continuous KDE decision on
+
+\[
+100.0\%
+\]
+
+of the test points.
+
+The confusion table was
+
+\begin{table}[!bt]
+\centering
+\caption{Continuous KDE versus stored uint8 decisions.}
+\label{tab:confusion}
+\begin{tabular}{lrrrr}
+\toprule
+ & c0 & c1 & c2 & Unknown \\
+\midrule
+Class 0 & 69 & 0 & 0 & 0 \\
+Class 1 & 0 & 68 & 0 & 0 \\
+Class 2 & 0 & 0 & 63 & 0 \\
+Unknown & 0 & 0 & 0 & 6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All 206 decisions agreed. This includes six test points that were rejected as
+UNKNOWN by both the continuous and stored models. For this held-out test set,
+the reduction from continuous floating-point KDE surfaces to the 768-byte
+\texttt{uint8} lookup model did not change any classification decisions.
 
 \end{document}
