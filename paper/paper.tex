@@ -1,4 +1,4 @@
-\documentclass[10pt,a4paper,twocolumn]{article}
+\documentcla\documentclass[10pt,a4paper,twocolumn]{article}
 
 \usepackage{amsmath}
 \usepackage{graphicx}
@@ -458,4 +458,56 @@ UNKNOWN by both the continuous and stored models. For this held-out test set,
 the reduction from continuous floating-point KDE surfaces to the 768-byte
 \texttt{uint8} lookup model did not change any classification decisions.
 
+\section{Limitations and Remaining Uncertainty}
+
+This experiment used only one synthetic two-dimensional dataset. The results
+show that the pipeline worked well on this dataset, but they do not prove that
+the same performance would be obtained with real sensor data or with a larger
+number of features.
+
+The class labels were created by DBSCAN instead of being provided by an
+external ground-truth label set. This means that the later stages of the
+pipeline assume the DBSCAN clusters are meaningful classes. The figures can
+show that the clusters are consistent with the shapes in the dataset, but they
+cannot prove that those labels would be correct for a real application.
+
+The reject threshold was set to
+
+\[
+\tau = 0.12.
+\]
+
+This value was selected as an engineering setting rather than being derived
+from labelled ground-truth data. The reject-region measurement showed that
+127 of the 256 grid cells, or 49.6\%, were below this threshold. This is useful
+because it prevents the classifier from forcing low-density points into a
+class, but a real application would need more evidence to choose the best
+threshold.
+
+The final test result also has an important limitation. The stored
+\texttt{uint8} model was compared against the continuous KDE's own decisions,
+not against true class labels. The 100.0\% agreement therefore shows that the
+stored model reproduced the continuous model on the 206 held-out test points.
+It does not prove that every decision represents the true physical class,
+because no ground-truth labels exist in this experiment.
+
+The grid resolution is another trade-off. Increasing the grid from
+$16 \times 16$ to $32 \times 32$ improved the spatial detail of the stored
+maps, especially around the ring, but increased the lookup-table storage from
+768 bytes to 3072 bytes. This happens because memory grows with $G^2$ while
+the resolution of each axis grows only with $G$. A real design would therefore
+need to choose the grid size based on its available flash and the amount of
+spatial detail required.
+
+The KDE results were also sensitive to bandwidth. The validation sweep showed
+that small bandwidth values produced sharper density regions, while large
+values smoothed the maps and began to fill the hollow centre of the ring.
+Although $h=0.05$ performed best on the validation data used here, a different
+dataset could require a different value.
+
+The next step would be to test the same pipeline using real labelled sensor
+data from the intended application. This would make it possible to compare the
+DBSCAN-generated classes against known classes, measure true classification
+accuracy, and select the reject threshold using real errors instead of only
+agreement with the continuous KDE.
 \end{document}
