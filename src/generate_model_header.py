@@ -3,7 +3,7 @@ import numpy as np
 
 SURFACES_FILE = "../assignment1/surfaces.npz"
 BOUNDS_FILE = "../assignment1/scaling_bounds.npz"
-OUTPUT_FILE = "../assignment1/model.h"
+OUTPUT_FILE = "../assignment1/firmware/model.h"
 
 # Keep the same reject threshold used by the previous pipeline for now.
 # We will evaluate its behaviour with the real held-out data in Part 4.
