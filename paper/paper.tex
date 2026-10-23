@@ -4,62 +4,94 @@
 \usepackage{graphicx}
 \graphicspath{{../figures/generated/}{figures/generated/}}
 \usepackage{booktabs}
-\usepackage{tabularx}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage{hyperref}
+\usepackage{float}
+\usepackage{microtype}
 
-\title{Modeling a More Complex Classification System}
+\title{Embedded Lighting Classification Using Quantized Density Maps}
 \author{Ali Hussain}
-\date{}
+\date{October 2026}
 
 \begin{document}
 
 \maketitle
 
 
-\section{Proposed Pipeline}
+\begin{abstract}
 
-The proposed pipeline is designed to classify two-dimensional data when the
-training data does not already have class labels. Most of the work is completed
-offline on a computer. Only a small lookup step is performed on the embedded
-device.
+This project implements a four-class lighting classifier on an ESP32 using
+real UV and IR sensor measurements. The dataset contains 2400 labelled samples
+from LED, fluorescent, shade, and sunlight conditions. DBSCAN was used to
+discover groups in the sensor data without using the labels, and Gaussian
+kernel density estimation (KDE) was then used to model each group.
 
-First, the training features are scaled using min--max scaling. DBSCAN is then
-used to discover groups in the unlabelled training data. A Gaussian kernel
-density estimate (KDE) is fitted separately to each discovered class. Each
-density map is normalised to its own peak and sampled onto a fixed grid. The
-grid values are then converted to \texttt{uint8} so that each cell requires
-only one byte.
+The KDE results were converted into four $16\times16$ byte lookup tables.
+The final stored model data requires 1040 bytes and has a measured worst-case
+quantization error of 0.193\%.
 
-The embedded device does not run DBSCAN or KDE. Those steps are already
-completed offline. The device stores the byte tables, the training scaling
-bounds, the grid size, and the reject threshold.
+The model was deployed to an ESP32 and tested again using a separately
+collected batch of 2324 readings. The ESP32 and desktop implementations agreed
+on every reading in this batch. LED, fluorescent, and shade remained correctly
+classified, while an overcast outdoor batch was rejected as UNKNOWN because
+it differed from the clear-sun training measurements.
 
-For a new query point, the device scales the two features using the stored
-training bounds. It then finds the correct grid cell and reads one byte from
-each class table. The class with the largest stored value is selected. If the
-largest value is below the reject threshold, the output is UNKNOWN instead of
-forcing the point into a class.
+The final ESP32 program used 308800 bytes of flash and 23740 bytes of SRAM.
+Classification required approximately 3--6~$\mu$s per query.
 
-\begin{algorithm}[!bt]
-\caption{Table-lookup classification}
+\end{abstract}
+
+
+\section{System Design}
+
+The goal of the project was to move the density-based classifier from offline
+Python testing to a working embedded system.
+
+Training is performed on a computer. The ESP32 stores only the final lookup
+model and the values needed to repeat the same preprocessing.
+
+The two input features are
+
+\begin{itemize}
+    \item an analog UV measurement,
+    \item the IR channel of a TSL2591 light sensor.
+\end{itemize}
+
+The embedded path is
+
+\[
+\text{read}
+\rightarrow
+\text{EMA}
+\rightarrow
+\log(1+x)
+\rightarrow
+\text{scale}
+\rightarrow
+\text{lookup}.
+\]
+
+DBSCAN and KDE are therefore not executed during normal ESP32 operation.
+
+For every new reading, the two features are converted to a grid location.
+The ESP32 reads one byte from each class table and selects the class with the
+largest value.
+
+\begin{algorithm}[H]
+\caption{Embedded classification}
 \label{alg:lookup}
+\small
 \begin{algorithmic}[1]
 
-\Require Raw query point $(x,y)$
-\Require One byte table $Q_c$ for each class
-\Require Training scaling bounds
-\Require Grid size $G$
-\Require Reject threshold $\tau$
-\Ensure Predicted class or UNKNOWN
+\Require Sensor readings $x,y$
+\Require Tables $Q_c$, scaling bounds, $G$, $\tau$
+\Ensure Class or UNKNOWN
 
-\State Scale $x$ and $y$ using the stored training bounds
-
-\State $col \gets \lfloor \tilde{x}G \rfloor$
-\State $row \gets \lfloor \tilde{y}G \rfloor$
-
-\State Clip $row$ and $col$ to $[0,G-1]$
+\State Apply EMA filtering
+\State Apply $\log(1+x)$ to both features
+\State Scale using the stored training bounds
+\State Find and clip the grid row and column
 
 \For{each class $c$}
     \State $v_c \gets Q_c[row,col]/255$
@@ -69,445 +101,787 @@ forcing the point into a class.
 
 \If{$v_{\hat{c}} < \tau$}
     \State \Return UNKNOWN
+\Else
+    \State \Return $\hat{c}$
 \EndIf
-
-\State $p_c \gets v_c / \sum_k v_k$
-
-\State \Return $\hat{c}$ and distribution $p$
 
 \end{algorithmic}
 \end{algorithm}
 
-\section{Application}
+With four classes, each prediction requires only four table reads.
 
-One possible application for this pipeline is a small wearable motion
-classifier that recognises different movement patterns from two sensor
-features.
 
-For this proposed device, I would reserve approximately 4~KB of flash for the
-classification model. The final lookup tables from this experiment require
-only 768 bytes, plus 16 bytes for the four scaling bounds, so the model fits
-comfortably inside this budget.
+\section{Hardware and Data}
 
-Labelled training data may not be available because the device could collect
-motion data during normal use without a person manually identifying every
-sample. DBSCAN is useful in this situation because it can discover groups
-directly from the unlabelled feature data.
+\subsection{Prototype}
 
-The motion classes may also have non-round shapes in the feature space.
-Different movements can create curved or hollow regions rather than simple
-groups centred around one average point. A density-based method is therefore a
-better match than a nearest-centre method such as k-means.
+The prototype uses an ESP32 development board, an analog UV sensor, and a
+TSL2591 light sensor.
 
-\section{Method and Setup}
+The UV sensor was connected to GPIO34.
 
-The experiment used a synthetic dataset containing 1030 two-dimensional
-points. The dataset was generated using the fixed random seed
+The TSL2591 used I2C with
+
+\[
+\text{SDA}=21,
+\qquad
+\text{SCL}=22.
+\]
+
+The TSL2591 was configured with medium gain and a 100~ms integration time.
+
+The original assignment diagram showed a separate analog IR detector. The
+prototype used the IR channel of the TSL2591 instead. This provided a stable IR
+measurement and allowed the same sensor configuration to be used during data
+collection and live testing.
+
+Figure~\ref{fig:prototype} shows the completed prototype.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{prototype_photo.png}
+    \caption{ESP32 prototype with the UV and TSL2591 sensors.}
+    \label{fig:prototype}
+\end{figure}
+
+
+\subsection{Data Collection}
+
+Measurements were streamed through the Serial Monitor and stored as labelled
+CSV data.
+
+Four lighting conditions were collected.
+
+\begin{table}[H]
+\centering
+\caption{Collected dataset.}
+\label{tab:samples}
+\begin{tabular}{lr}
+\toprule
+Condition & Samples \\
+\midrule
+LED & 600 \\
+Fluorescent & 600 \\
+Shade & 600 \\
+Sun & 600 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The total dataset contains
+
+\[
+4(600)=2400
+\]
+
+samples.
+
+
+\subsection{EMA Filtering}
+
+An exponential moving average was used to reduce short sensor fluctuations.
+
+The filter is
+
+\[
+s_n=\alpha x_n+(1-\alpha)s_{n-1}
+\]
+
+with
+
+\[
+\alpha=0.2.
+\]
+
+This means that each new filtered value contains 20\% of the newest
+measurement and 80\% of the previous filtered value.
+
+EMA was selected because it needs only one previous value and is inexpensive
+to run continuously on the ESP32.
+
+
+\section{Training and Model Generation}
+
+\subsection{Data Split}
+
+The original dataset was divided using the fixed random seed
 
 \[
 20250903.
 \]
 
-It contained two crescent-shaped groups, one ring-shaped group, and 90
-uniformly scattered background points.
-
-The dataset was divided into three parts:
-
-\begin{itemize}
-    \item 60\% training,
-    \item 20\% validation,
-    \item 20\% test.
-\end{itemize}
-
-The training set contained 618 points. It was used for DBSCAN clustering, KDE
-fitting, and creation of the stored lookup tables.
-
-The validation set was used to select the KDE bandwidth. The test set was kept
-unused during training and tuning and was used only once at the end to evaluate
-the frozen model.
-
-Both features were min--max scaled using bounds calculated only from the
-training set. The same bounds were used later to scale the validation, test,
-and query points.
-
-DBSCAN was applied to the scaled training data using
+The split was
 
 \[
-\varepsilon = 0.06
+60\% \text{ training},
+\qquad
+20\% \text{ validation},
+\qquad
+20\% \text{ test}.
+\]
+
+This produced
+
+\[
+1440
+\]
+
+training samples,
+
+\[
+480
+\]
+
+validation samples, and
+
+\[
+480
+\]
+
+held-out test samples.
+
+Each class contributed 360 training, 120 validation, and 120 test readings.
+
+
+\subsection{Feature Transformation}
+
+The sunlight readings were much larger than the indoor readings.
+
+When only min--max scaling was used, the indoor measurements were compressed
+into a small part of the feature space.
+
+A logarithmic transformation was therefore applied to both sensor features:
+
+\[
+x'=\log(1+x).
+\]
+
+The transformed features were then min--max scaled.
+
+The scaling limits were calculated using the training split only. The same
+limits were later stored in \texttt{model.h} for the ESP32.
+
+
+\subsection{DBSCAN}
+
+DBSCAN was run using only the two sensor features. The known lighting labels
+were not given to the clustering algorithm.
+
+The final settings were
+
+\[
+\varepsilon=0.02
 \]
 
 and
 
 \[
-\texttt{min\_samples} = 8.
+\texttt{min\_samples}=8.
 \]
 
-The baseline DBSCAN run discovered three clusters containing 209, 198, and
-178 points. Another 33 training points were labelled as noise.
+Four training clusters were found and no training samples were marked as
+noise.
 
-A Gaussian KDE was fitted separately to each discovered class. Noise points
-were excluded from the KDE fitting because they were not assigned to a
-discovered class.
-
-The KDE bandwidth was selected using the validation set. The tested values
-were
-
-\[
-0.03,\ 0.04,\ 0.05,\ 0.06,\ 0.08,\ 0.10,\ 0.12.
-\]
-
-The highest validation mean log-likelihood was produced by
-
-\[
-h = 0.05,
-\]
-
-so this value was used for the final model.
-
-Each normalised KDE surface was sampled onto a
-
-\[
-16 \times 16
-\]
-
-grid and stored using \texttt{uint8}. The reject threshold was
-
-\[
-\tau = 0.12.
-\]
-\section{Evidence}
-
-The evidence follows the same order as the data split. The model was built
-using the training data, the KDE bandwidth was selected using validation data,
-and the final stored model was checked using the held-out test set.
-
-\subsection{DBSCAN and k-means}
-
-Figure~\ref{fig:clustering} compares DBSCAN and k-means on the same training
-data.
-
-\begin{figure}[!bt]
-    \centering
-    \includegraphics[width=\linewidth]{clustered_space.pdf}
-    \caption{DBSCAN and k-means applied to the same training data.}
-    \label{fig:clustering}
-\end{figure}
-
-With $\varepsilon = 0.06$ and \texttt{min\_samples = 8}, DBSCAN discovered
-three clusters containing 209, 198, and 178 points. Another 33 points were
-labelled as noise.
-
-K-means was given the correct value of $k=3$, but it still divided the
-non-round shapes incorrectly. The crescents were cut into centre-based regions,
-and the ring could not be represented as a hollow shape. This happens because
-k-means assigns each point to its nearest centre, while DBSCAN follows regions
-of connected density.
-
-Changing $\varepsilon$ also showed how sensitive DBSCAN is to the
-neighbourhood radius. With $\varepsilon = 0.03$, the scaled data produced
-15 clusters and 82 noise points. With $\varepsilon = 0.30$, all 618 training
-points became one cluster with no noise.
-
-The effect of feature scaling is shown in Table~\ref{tab:scaling}.
-
-\begin{table}[!bt]
+\begin{table}[H]
 \centering
-\caption{Effect of scaling on DBSCAN.}
-\label{tab:scaling}
-\begin{tabular}{lcc}
+\caption{Ground-truth labels compared with DBSCAN clusters.}
+\label{tab:dbscan}
+\begin{tabular}{lrrrr}
 \toprule
-Features & $\varepsilon=0.06$ & $\varepsilon=0.30$ \\
+True label & C0 & C1 & C2 & C3 \\
 \midrule
-Raw & 0 clusters, 618 noise & 10 clusters, 50 noise \\
-Scaled & 3 clusters, 33 noise & 1 cluster, 0 noise \\
+LED         & 360 & 0   & 0   & 0 \\
+Fluorescent & 0   & 360 & 0   & 0 \\
+Shade       & 0   & 0   & 360 & 0 \\
+Sun         & 0   & 0   & 0   & 360 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The same $\varepsilon$ value therefore produces very different results in raw
-and scaled feature spaces. Scaling gives the distance parameter a consistent
-meaning across both features.
+The final mapping was
+
+\[
+C0=\text{LED},
+\qquad
+C1=\text{fluorescent},
+\]
+
+\[
+C2=\text{shade},
+\qquad
+C3=\text{sun}.
+\]
+
+The perfect diagonal in Table~\ref{tab:dbscan} occurred because the four
+training groups were compact and well separated after the feature
+transformation.
+
+The indoor classes were separated mainly by IR level. Sunlight was farther
+away because it produced a much larger response in both features.
+
+Figure~\ref{fig:dbscan} shows the final DBSCAN result.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{dbscan_real_clusters.pdf}
+    \caption{DBSCAN clusters after feature transformation and scaling.}
+    \label{fig:dbscan}
+\end{figure}
 
 
-\subsection{KDE and Bandwidth Selection}
+\subsection{KDE Bandwidth}
 
-The KDE bandwidth was selected using the validation set. The results are shown
-in Table~\ref{tab:bandwidth}.
+A Gaussian KDE was fitted separately to each discovered cluster.
 
-\begin{table}[!bt]
+The validation sweep is shown in Table~\ref{tab:kde}.
+
+\begin{table}[H]
 \centering
-\caption{Validation bandwidth sweep.}
-\label{tab:bandwidth}
+\caption{KDE bandwidth validation.}
+\label{tab:kde}
 \begin{tabular}{cc}
 \toprule
 Bandwidth $h$ & Mean log-likelihood \\
 \midrule
-0.03 & 1.668 \\
-0.04 & 1.775 \\
-0.05 & 1.806 \\
-0.06 & 1.767 \\
-0.08 & 1.632 \\
-0.10 & 1.487 \\
-0.12 & 1.353 \\
+0.03 & 5.157 \\
+0.04 & 4.660 \\
+0.05 & 4.317 \\
+0.06 & 4.049 \\
+0.08 & 3.626 \\
+0.10 & 3.285 \\
+0.12 & 2.994 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The highest validation score was obtained with $h=0.05$, so this value was
-used for the final model.
+The highest score in the tested range occurred at
 
-Figure~\ref{fig:continuous} shows the continuous per-class KDE surfaces.
+\[
+h=0.03.
+\]
 
-\begin{figure}[!bt]
+Figure~\ref{fig:kde} shows the same sweep.
+
+\begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{class_surfaces_continuous.pdf}
-    \caption{Continuous KDE surfaces for the three discovered classes.}
-    \label{fig:continuous}
+    \includegraphics[width=\linewidth]{kde_bandwidth_validation.pdf}
+    \caption{Validation log-likelihood for the tested KDE bandwidths.}
+    \label{fig:kde}
 \end{figure}
 
-The two crescent-shaped classes remain curved and the ring keeps a hollow
-centre. This shows that the probability maps preserve the non-round shapes
-discovered by DBSCAN.
+The selected value is at the lower end of the sweep. A smaller bandwidth could
+produce finer density structure, but the embedded model is eventually stored
+on only a
 
-Figure~\ref{fig:total} shows the continuous decision surface before the model
-is reduced to the stored lookup grid.
+\[
+16\times16
+\]
 
-\begin{figure}[!bt]
-    \centering
-    \includegraphics[width=\linewidth]{total_distribution.pdf}
-    \caption{Continuous decision surface before discretization.}
-    \label{fig:total}
-\end{figure}
+grid.
 
-Using a smaller bandwidth of $h=0.03$ produced sharper and more local density
-regions. Using $h=0.12$ produced smoother and wider regions and made the
-ring's hollow centre less distinct. This shows why the bandwidth was selected
-using validation data instead of by choosing the plot that looked best.
+One grid interval represents
+
+\[
+\frac{1}{16}=0.0625
+\]
+
+of a scaled feature axis. Very small KDE details therefore cannot be preserved
+exactly by the final stored table.
 
 
-\subsection{Stored Model and Memory Cost}
+\subsection{Quantized Lookup Model}
 
-Figure~\ref{fig:stored} shows the same class maps after sampling them onto the
-$16 \times 16$ grid and storing each cell as \texttt{uint8}.
+Each KDE surface was evaluated on a
 
-\begin{figure}[!bt]
-    \centering
-    \includegraphics[width=\linewidth]{class_surfaces_discretized.pdf}
-    \caption{Per-class maps stored as uint8 lookup tables.}
-    \label{fig:stored}
-\end{figure}
+\[
+16\times16
+\]
 
-The stored maps are more blocky because the grid contains only
-$16 \times 16$ positions, but the same general class shapes remain visible.
-The visible difference mainly comes from grid resolution rather than byte
-quantization.
+grid and converted to \texttt{uint8}.
 
-The measured storage requirements are shown in
-Table~\ref{tab:footprint}.
+The four class tables require
 
-\begin{table}[!bt]
+\[
+4(16)(16)(1)=1024\text{ bytes}.
+\]
+
+The four floating-point scaling bounds add
+
+\[
+4(4)=16\text{ bytes}.
+\]
+
+The total model-data footprint is therefore
+
+\[
+1024+16=1040\text{ bytes}.
+\]
+
+The measured worst-case quantization error was
+
+\[
+0.193\%.
+\]
+
+\begin{table}[H]
 \centering
-\caption{Model footprint using a $16 \times 16$ grid.}
-\label{tab:footprint}
+\caption{Storage required by the class tables.}
+\label{tab:storage}
+\begin{tabular}{lrr}
+\toprule
+Format & Bytes/cell & Total \\
+\midrule
+\texttt{uint8} & 1 & 1024 B \\
+\texttt{uint16} & 2 & 2048 B \\
+\texttt{float32} & 4 & 4096 B \\
+\texttt{float64} & 8 & 8192 B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The byte format was selected because it greatly reduced storage while keeping
+the same class decisions on the original test split.
+
+
+\subsection{Generated Header}
+
+The trained model was exported using
+
+\[
+\texttt{generate\_model\_header.py}.
+\]
+
+The generated \texttt{model.h} contains
+
+\begin{itemize}
+    \item \texttt{GRID\_N = 16},
+    \item \texttt{NUM\_CLASSES = 4},
+    \item the four class tables,
+    \item the four scaling bounds,
+    \item the class names,
+    \item \texttt{REJECT\_TAU = 0.12}.
+\end{itemize}
+
+
+\section{Experimental Results}
+
+\subsection{Original Held-Out Test}
+
+The first test used the 480 samples that were not used during training or
+bandwidth selection.
+
+\begin{table}[H]
+\centering
+\caption{Original held-out classification results.}
+\label{tab:test}
+\begin{tabular}{lrr}
+\toprule
+Class & Tested & Correct \\
+\midrule
+LED & 120 & 120 \\
+Fluorescent & 120 & 120 \\
+Shade & 120 & 120 \\
+Sun & 120 & 120 \\
+\midrule
+Total & 480 & 480 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The resulting accuracy was
+
+\[
+\frac{480}{480}\times100=100\%.
+\]
+
+The continuous KDE and the quantized byte-table model also produced the same
+class decision for all 480 readings.
+
+This result confirms that quantization did not change the decisions on this
+split. It should not, however, be treated as a complete estimate of real-world
+accuracy because neighbouring sensor readings from the same recording are
+highly related.
+
+
+\subsection{Fresh Deployment Batch}
+
+A second test was performed using measurements collected separately from the
+original dataset.
+
+This fresh batch contained
+
+\[
+581
+\]
+
+readings for each condition, giving
+
+\[
+4(581)=2324
+\]
+
+new samples.
+
+The same samples were evaluated using both the ESP32 and desktop lookup
+implementations.
+
+The two implementations agreed on all 2324 readings:
+
+\[
+\frac{2324}{2324}\times100=100\%.
+\]
+
+\begin{table}[H]
+\centering
+\caption{Fresh deployment-batch results.}
+\label{tab:fresh}
 \begin{tabular}{lrrr}
 \toprule
-Storage & B/cell & Per class & All 3 \\
+Class & Device=PC & Correct & UNKNOWN \\
 \midrule
-\texttt{uint8}   & 1 & 256  & 768  \\
-\texttt{uint16}  & 2 & 512  & 1536 \\
-\texttt{float32} & 4 & 1024 & 3072 \\
-\texttt{float64} & 8 & 2048 & 6144 \\
+LED & 100\% & 100\% & 0\% \\
+Fluorescent & 100\% & 100\% & 0\% \\
+Shade & 100\% & 100\% & 0\% \\
+Sun & 100\% & 0\% & 100\% \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The lookup-table footprint is
+LED, fluorescent, and shade were classified correctly in the fresh batch.
 
-\begin{equation}
-\text{flash bytes} = K G^2.
-\label{eq:footprint}
-\end{equation}
+The fresh outdoor readings were collected under overcast conditions, while
+the original sun training data represented clearer sunlight. All 581 of those
+readings were rejected as UNKNOWN.
 
-For three classes and a $16 \times 16$ grid,
+Because the ESP32 and desktop model made the same decision, this was not an
+ESP32 implementation error. The new outdoor condition simply did not match the
+stored clear-sun region closely enough.
 
-\[
-3 \times 16^2 = 768 \text{ bytes}.
-\]
-
-The four scaling bounds add another 16 bytes when stored as
-\texttt{float32}.
-
-The measured worst-case \texttt{uint8} error was 0.195\% of peak density.
-This is very close to the expected maximum quantization error of approximately
-0.196\%. The \texttt{uint8} model therefore reduces the three lookup tables
-from 3072 bytes with \texttt{float32} to 768 bytes while introducing very
-little numerical error.
-
-When the grid was temporarily increased to $32 \times 32$, the
-\texttt{uint8} storage increased from 768 bytes to 3072 bytes. The ring shape
-was represented more smoothly, but doubling the grid resolution in each
-direction increased storage by four times because the footprint grows with
-$G^2$.
+This also confirms that the reject mechanism is active in the deployed model.
 
 
-\subsection{Held-out Query Classification}
+\subsection{Filtering Evidence}
 
-Figure~\ref{fig:decision} shows one held-out test point being classified by the
-stored model.
+Raw and EMA-filtered IR readings were recorded during hardware testing.
 
-\begin{figure}[!bt]
+Two representative sequences are shown in
+Figure~\ref{fig:filtering}.
+
+\begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{decision_map.pdf}
-    \caption{One held-out test point classified using the stored lookup tables.}
-    \label{fig:decision}
+
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{filter_led.pdf}
+        \small (a) LED
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{filter_fluorescent.pdf}
+        \small (b) Fluorescent
+    \end{minipage}
+
+    \caption{Measured raw and EMA-filtered IR readings for LED and
+    fluorescent lighting.}
+    \label{fig:filtering}
 \end{figure}
 
-The raw query point was
+The LED sequence contains smaller sample-to-sample changes. The filtered line
+removes part of this variation while still following the gradual increase near
+the end of the recording.
+
+The fluorescent sequence contains a much faster decrease in IR level. The EMA
+follows the same change more slowly, which clearly shows the delay introduced
+by the filter.
+
+The two examples show the main trade-off of the selected value
 
 \[
-(5.99958893,\ 3.17868816),
+\alpha=0.2.
 \]
 
-which mapped to row 11, column 13 of the $16 \times 16$ grid.
+Short changes are reduced, but a large real change takes several samples to
+appear fully in the filtered signal.
 
-Nearest-cell lookup read the stored values
+The filtered LED and fluorescent levels also remain clearly separated, so the
+filter does not remove the large difference between these two lighting
+conditions.
+
+
+\subsection{Model Cost}
+
+The expected lookup-table storage was
 
 \[
-[0,\ 255,\ 0]
+1024\text{ bytes}.
 \]
 
-for classes 0, 1, and 2. This produced a distribution of
+A separate compile was used to isolate the cost of adding the model to the
+firmware.
+
+The measured flash increase was
 
 \[
-[0\%,\ 100\%,\ 0\%]
+1060\text{ bytes}.
 \]
 
-and classified the point as class 1.
-
-Bilinear lookup produced approximately
+The difference from the table-only prediction is
 
 \[
-[0,\ 221.8,\ 0]
+1060-1024=36\text{ bytes}.
 \]
 
-and gave the same 100\% class 1 distribution. The two methods therefore gave
-the same decision for this point. Nearest-cell lookup requires $K$ byte reads,
-while bilinear lookup requires $4K$ byte reads.
-
-Around the query cell, the class 1 byte values were
+This corresponds to approximately
 
 \[
-\begin{array}{ccc}
-187 & 164 & 76 \\
-208 & 255 & 183 \\
-68 & 159 & 222
-\end{array}
+\frac{36}{1024}\times100
+\approx3.5\%.
 \]
 
-while the corresponding class 0 and class 2 values were all zero. The strong
-change between nearby cells shows that the stored surface can change sharply
-at this grid resolution. Bilinear interpolation would have the greatest effect
-near these cell boundaries.
+The additional space includes the scaling bounds and the small amount of code
+and model information required to perform the lookup.
 
-The reject threshold also affected a large part of the feature space.
-A total of 127 of the 256 grid cells were below $\tau = 0.12$, which is
-49.6\% of the grid. Without a reject threshold, points in these low-density
-areas would still be forced into one of the classes even though the model had
-little evidence for that decision.
-
-The raw point at the centre of the ring,
+No increase in global SRAM was measured when the stored model was added:
 
 \[
-(4.8,\ 1.6),
+\Delta\text{SRAM}=0\text{ bytes}.
 \]
 
-was classified as UNKNOWN. This is the expected behaviour because the centre
-is surrounded by ring data but contains no training samples itself.
+The class tables therefore remain in program memory rather than being copied
+into normal SRAM.
 
-\subsection{Held-out Test Result}
-
-The final stored model was evaluated once on the 206 held-out test points.
-The stored \texttt{uint8} classifier reproduced the continuous KDE decision on
-
-\[
-100.0\%
-\]
-
-of the test points.
-
-The confusion table was
-
-\begin{table}[!bt]
+\begin{table}[H]
 \centering
-\caption{Continuous KDE versus stored uint8 decisions.}
-\label{tab:confusion}
-\begin{tabular}{lrrrr}
+\caption{Predicted and measured model cost.}
+\label{tab:cost}
+\begin{tabular}{lrr}
 \toprule
- & c0 & c1 & c2 & Unknown \\
+Quantity & Prediction & Measurement \\
 \midrule
-Class 0 & 69 & 0 & 0 & 0 \\
-Class 1 & 0 & 68 & 0 & 0 \\
-Class 2 & 0 & 0 & 63 & 0 \\
-Unknown & 0 & 0 & 0 & 6 \\
+Table storage & 1024 B & 1060 B flash increase \\
+Model SRAM & 0 B & 0 B increase \\
+Model data & 1040 B & 1040 B \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-All 206 decisions agreed. This includes six test points that were rejected as
-UNKNOWN by both the continuous and stored models. For this held-out test set,
-the reduction from continuous floating-point KDE surfaces to the 768-byte
-\texttt{uint8} lookup model did not change any classification decisions.
 
-\section{Limitations and Remaining Uncertainty}
+\subsection{Complete Program Memory}
 
-This experiment used only one synthetic two-dimensional dataset. The results
-show that the pipeline worked well on this dataset, but they do not prove that
-the same performance would be obtained with real sensor data or with a larger
-number of features.
-
-The class labels were created by DBSCAN instead of being provided by an
-external ground-truth label set. This means that the later stages of the
-pipeline assume the DBSCAN clusters are meaningful classes. The figures can
-show that the clusters are consistent with the shapes in the dataset, but they
-cannot prove that those labels would be correct for a real application.
-
-The reject threshold was set to
+The complete final Arduino program used
 
 \[
-\tau = 0.12.
+308800\text{ bytes}
 \]
 
-This value was selected as an engineering setting rather than being derived
-from labelled ground-truth data. The reject-region measurement showed that
-127 of the 256 grid cells, or 49.6\%, were below this threshold. This is useful
-because it prevents the classifier from forcing low-density points into a
-class, but a real application would need more evidence to choose the best
-threshold.
+of flash and
 
-The final test result also has an important limitation. The stored
-\texttt{uint8} model was compared against the continuous KDE's own decisions,
-not against true class labels. The 100.0\% agreement therefore shows that the
-stored model reproduced the continuous model on the 206 held-out test points.
-It does not prove that every decision represents the true physical class,
-because no ground-truth labels exist in this experiment.
+\[
+23740\text{ bytes}
+\]
 
-The grid resolution is another trade-off. Increasing the grid from
-$16 \times 16$ to $32 \times 32$ improved the spatial detail of the stored
-maps, especially around the ring, but increased the lookup-table storage from
-768 bytes to 3072 bytes. This happens because memory grows with $G^2$ while
-the resolution of each axis grows only with $G$. A real design would therefore
-need to choose the grid size based on its available flash and the amount of
-spatial detail required.
+of global SRAM.
 
-The KDE results were also sensitive to bandwidth. The validation sweep showed
-that small bandwidth values produced sharper density regions, while large
-values smoothed the maps and began to fill the hollow centre of the ring.
-Although $h=0.05$ performed best on the validation data used here, a different
-dataset could require a different value.
+These totals include the ESP32 core, sensor libraries, Serial code, filtering,
+and the rest of the firmware, so they are larger than the model-only values in
+Table~\ref{tab:cost}.
 
-The next step would be to test the same pipeline using real labelled sensor
-data from the intended application. This would make it possible to compare the
-DBSCAN-generated classes against known classes, measure true classification
-accuracy, and select the reject threshold using real errors instead of only
-agreement with the continuous KDE.
+
+\subsection{Inference Time}
+
+Classification latency was measured using \texttt{micros()}.
+
+The final implementation required approximately
+
+\[
+3\text{--}6~\mu s
+\]
+
+per classification.
+
+This timing covers the classification operation itself. Sensor integration and
+Serial printing were not included.
+
+The lookup time is very small compared with the approximately 100~ms sensor
+sampling period.
+
+
+\section{Discussion}
+
+The original test split and the fresh deployment test answer different
+questions.
+
+The random 60/20/20 split produced 100\% accuracy, but consecutive sensor
+readings are strongly related in time. EMA filtering increases this
+relationship because each filtered sample contains information from the
+previous sample.
+
+A random row split can therefore place very similar readings into both
+training and test sets.
+
+For this reason, the 480/480 result is useful for checking the training and
+quantization pipeline, but it is probably optimistic as a measure of
+performance in a different environment.
+
+The separately collected deployment batch gives a more realistic test.
+
+The indoor classes still worked, but the outdoor condition changed enough that
+the model rejected it.
+
+This is also useful evidence for the reject threshold
+
+\[
+\tau=0.12.
+\]
+
+The threshold was not fully optimized using a dedicated unknown-condition
+dataset. However, the overcast test shows that UNKNOWN is actually used when a
+measurement falls outside the learned regions.
+
+
+\subsection{Why the DBSCAN Table is Perfect}
+
+The perfect DBSCAN confusion table is a result on the training split, not proof
+that every future lighting condition will be classified perfectly.
+
+After the logarithmic transformation, the four training conditions formed
+tight groups.
+
+The three indoor classes were separated mainly along the IR feature, while the
+sun group was farther away because both UV and IR were much larger.
+
+This explains why DBSCAN matched the training labels exactly but the later
+overcast outdoor readings did not behave like the original sun measurements.
+
+
+\subsection{KDE and Grid Resolution}
+
+The ESP32 does not store the continuous KDE functions.
+
+It stores a
+
+\[
+16\times16
+\]
+
+sampled version of each surface.
+
+Each scaled feature axis is divided into steps of
+
+\[
+0.0625.
+\]
+
+A very small KDE bandwidth can create density detail that is finer than this
+stored resolution.
+
+This is why the validation likelihood alone should not be used to argue that
+an arbitrarily small bandwidth would improve the final embedded classifier.
+
+
+\section{Limitations}
+
+The classifier represents only four lighting conditions.
+
+Different lamps, brightness levels, sensor angles, distances, rooms, mixed
+lighting, or weather can move readings outside the original training
+distribution.
+
+The overcast outdoor batch demonstrated this limitation directly.
+
+The original 60/20/20 test split also came from the same overall recordings as
+the training data. A stronger future test would split complete recording
+sessions or time blocks instead of individual rows.
+
+The EMA filter reduces short fluctuations but introduces delay. A sufficiently
+large or fast change can still move the filtered signal toward another region.
+
+The reject threshold
+
+\[
+\tau=0.12
+\]
+
+was fixed rather than optimized with a dedicated collection of unknown and
+intermediate lighting conditions.
+
+The TSL2591 also has a finite measurement range. Outdoor operation should be
+tested under a wider range of sunlight levels to check how the sensor behaves
+near its upper range.
+
+Finally, the $16\times16$ grid is a compromise between model size and spatial
+resolution. Increasing the grid size would preserve more detail but increases
+storage according to
+
+\[
+KG^2.
+\]
+
+
+\section{Project Evidence}
+
+The completed hardware performed live classification on the ESP32.
+
+The project repository contains the labelled data, training scripts, generated
+model, ESP32 firmware, plots, and report:
+
+\begin{center}
+\url{https://github.com/AliBaba004/classification-pipeline}
+\end{center}
+
+
+\section{Conclusion}
+
+A four-class lighting classifier was trained from real UV and IR sensor
+measurements and deployed to an ESP32.
+
+The original dataset contained 2400 readings.
+
+After logarithmic transformation and scaling, DBSCAN produced four clean
+training clusters using
+
+\[
+\varepsilon=0.02
+\]
+
+and
+
+\[
+\texttt{min\_samples}=8.
+\]
+
+The final KDE model used
+
+\[
+h=0.03
+\]
+
+and was converted into four $16\times16$ byte lookup tables.
+
+The stored model data requires 1040 bytes, with a measured worst-case
+quantization error of 0.193\%.
+
+The original held-out split produced 480 correct classifications out of 480.
+A separate 2324-reading deployment batch produced 100\% agreement between the
+ESP32 and desktop lookup.
+
+LED, fluorescent, and shade remained correct in the fresh batch. The overcast
+outdoor samples were rejected as UNKNOWN because they did not match the
+clear-sun training condition.
+
+The filtering tests showed that EMA reduces short variation but also delays
+the response to a large change.
+
+The isolated model increased flash use by 1060 bytes and did not increase
+global SRAM. The complete final program used 308800 bytes of flash and
+23740 bytes of SRAM.
+
+Classification required approximately 3--6~$\mu$s per query.
+
+Overall, the results show that the DBSCAN--KDE pipeline can be reduced to a
+small lookup model that runs efficiently on the ESP32, while the fresh-batch
+test also shows why environmental testing outside the original training data
+is important.
+
 \end{document}
